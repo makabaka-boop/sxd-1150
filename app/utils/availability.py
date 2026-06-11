@@ -442,3 +442,87 @@ def check_available_slot_validity(
             )
 
     return None
+
+
+def check_pending_change_conflict(
+    db: Session,
+    venue_id: int,
+    start_time: datetime,
+    end_time: datetime,
+    exclude_booking_id: Optional[int] = None,
+    exclude_change_id: Optional[int] = None,
+) -> Optional[str]:
+    from app.models import BookingChangeApplication, BookingStatus
+
+    pending_statuses = [BookingStatus.PENDING, BookingStatus.APPROVING]
+    query = db.query(BookingChangeApplication).filter(
+        BookingChangeApplication.status.in_(pending_statuses),
+        BookingChangeApplication.target_start_time < end_time,
+        BookingChangeApplication.target_end_time > start_time,
+    )
+
+    if exclude_booking_id is not None:
+        query = query.filter(BookingChangeApplication.booking_id != exclude_booking_id)
+    if exclude_change_id is not None:
+        query = query.filter(BookingChangeApplication.id != exclude_change_id)
+
+    conflicts = query.all()
+    if not conflicts:
+        return None
+
+    conflict_ids = [str(c.id) for c in conflicts]
+    return f"目标时段与进行中的变更申请（ID: {', '.join(conflict_ids)}）存在时间冲突"
+
+
+def validate_change_availability(
+    db: Session,
+    venue: Venue,
+    rule: BookingRule,
+    rule_version: int,
+    booking_date: date,
+    start_time: datetime,
+    end_time: datetime,
+    original_booking_id: int,
+    exclude_change_id: Optional[int] = None,
+) -> None:
+    reason = check_same_day_booking(booking_date, start_time, end_time)
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+
+    reason = check_venue_active(venue)
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+
+    reason = check_rule_active(rule, rule_version)
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+
+    reason = check_booking_date_rule(booking_date, rule, rule_version)
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+
+    reason = check_time_in_available_slots(
+        db, venue.id, booking_date, start_time, end_time
+    )
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+
+    reason = check_unavailable_periods(
+        db, venue.id, booking_date, start_time, end_time
+    )
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+
+    reason = check_booking_time_overlap(
+        db, venue.id, start_time, end_time, exclude_booking_id=original_booking_id
+    )
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+
+    reason = check_pending_change_conflict(
+        db, venue.id, start_time, end_time,
+        exclude_booking_id=original_booking_id,
+        exclude_change_id=exclude_change_id,
+    )
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)

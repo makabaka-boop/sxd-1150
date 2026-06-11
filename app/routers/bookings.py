@@ -10,6 +10,7 @@ from app.models import (
     ApprovalRecord,
     ApprovalTemplate,
     BookingApplication,
+    BookingChangeApplication,
     BookingRule,
     BookingRuleVersion,
     BookingStatus,
@@ -24,6 +25,9 @@ from app.schemas import (
     BookingApplicationResponse,
     BookingApplicationUpdate,
     BookingCancelRequest,
+    BookingChangeDetailInBooking,
+    BookingChangeOriginalInfo,
+    BookingChangeTargetInfo,
     MessageResponse,
 )
 from app.utils.availability import (
@@ -99,6 +103,57 @@ def _enrich_booking_response(
         except Exception:
             continue
     resp.approval_records = enriched_records
+
+    try:
+        if db is not None:
+            pending_change = db.query(BookingChangeApplication).filter(
+                BookingChangeApplication.booking_id == booking.id,
+                BookingChangeApplication.status.in_([BookingStatus.PENDING, BookingStatus.APPROVING]),
+            ).first()
+            if pending_change:
+                original = BookingChangeOriginalInfo(
+                    booking_date=pending_change.original_booking_date,
+                    start_time=pending_change.original_start_time,
+                    end_time=pending_change.original_end_time,
+                    attendees=pending_change.original_attendees,
+                    purpose=pending_change.original_purpose,
+                )
+                target = BookingChangeTargetInfo(
+                    booking_date=pending_change.target_booking_date,
+                    start_time=pending_change.target_start_time,
+                    end_time=pending_change.target_end_time,
+                    attendees=pending_change.target_attendees,
+                    purpose=pending_change.target_purpose,
+                )
+                from app.routers.booking_changes import _compute_field_diffs, _get_change_current_node_name
+
+                change_records = []
+                for r in pending_change.approval_records:
+                    try:
+                        r_resp = ApprovalRecordResponse.model_validate(r)
+                        r_resp.booking_id = None
+                        if r.auditor:
+                            r_resp.auditor_name = r.auditor.full_name or r.auditor.username
+                        change_records.append(r_resp)
+                    except Exception:
+                        continue
+
+                change_info = BookingChangeDetailInBooking(
+                    has_pending_change=True,
+                    pending_change_id=pending_change.id,
+                    pending_change_status=pending_change.status,
+                    current_node_name=_get_change_current_node_name(db, pending_change),
+                    original=original,
+                    target=target,
+                    diff=_compute_field_diffs(original, target),
+                    approval_records=change_records,
+                )
+                resp.change_info = change_info
+            else:
+                resp.change_info = BookingChangeDetailInBooking(has_pending_change=False)
+    except Exception:
+        resp.change_info = None
+
     return resp
 
 

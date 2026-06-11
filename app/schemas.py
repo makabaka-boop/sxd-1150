@@ -448,6 +448,7 @@ class BookingApplicationResponse(BaseModel):
     approval_records: List[ApprovalRecordResponse] = []
     conflict_status: Optional[str] = None
     unavailability_reason: Optional[str] = None
+    change_info: Optional["BookingChangeDetailInBooking"] = None
 
 
 class BookingApplicationListResponse(BaseModel):
@@ -469,3 +470,88 @@ class ApprovalActionRequest(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str
+
+
+class BookingChangeFieldDiff(BaseModel):
+    field: str
+    field_name: str
+    original_value: Any
+    target_value: Any
+
+
+class BookingChangeCreate(BaseModel):
+    booking_id: int
+    target_booking_date: datetime
+    target_start_time: datetime
+    target_end_time: datetime
+    target_attendees: int = Field(0, ge=0)
+    target_purpose: Optional[str] = None
+    change_reason: Optional[str] = None
+
+
+class BookingChangeUpdate(BaseModel):
+    target_booking_date: Optional[datetime] = None
+    target_start_time: Optional[datetime] = None
+    target_end_time: Optional[datetime] = None
+    target_attendees: Optional[int] = Field(None, ge=0)
+    target_purpose: Optional[str] = None
+    change_reason: Optional[str] = None
+
+
+class BookingChangeOriginalInfo(BaseModel):
+    booking_date: datetime
+    start_time: datetime
+    end_time: datetime
+    attendees: int
+    purpose: Optional[str] = None
+
+
+class BookingChangeTargetInfo(BaseModel):
+    booking_date: datetime
+    start_time: datetime
+    end_time: datetime
+    attendees: int
+    purpose: Optional[str] = None
+
+
+class BookingChangeResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    booking_id: int
+    rule_id: int
+    rule_version: int
+    status: BookingStatus
+    current_node_index: int
+    current_node_name: Optional[str] = None
+    submitted_by: int
+    submitter_name: Optional[str] = None
+    submitted_at: datetime
+    updated_at: datetime
+    change_reason: Optional[str] = None
+    original: BookingChangeOriginalInfo
+    target: BookingChangeTargetInfo
+    diff: List[BookingChangeFieldDiff] = []
+    approval_records: List[ApprovalRecordResponse] = []
+    venue_id: Optional[int] = None
+    venue_name: Optional[str] = None
+
+
+class BookingChangeListResponse(BaseModel):
+    items: List[BookingChangeResponse]
+    total: int
+
+
+class BookingChangeDetailInBooking(BaseModel):
+    has_pending_change: bool = False
+    pending_change_id: Optional[int] = None
+    pending_change_status: Optional[BookingStatus] = None
+    current_node_name: Optional[str] = None
+    original: Optional[BookingChangeOriginalInfo] = None
+    target: Optional[BookingChangeTargetInfo] = None
+    diff: List[BookingChangeFieldDiff] = []
+    approval_records: List[ApprovalRecordResponse] = []
+
+
+BookingApplicationResponse.model_rebuild()
+BookingChangeResponse.model_rebuild()

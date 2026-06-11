@@ -269,8 +269,15 @@ class BookingApplication(Base):
     approval_records = relationship(
         "ApprovalRecord",
         back_populates="booking",
+        primaryjoin="and_(ApprovalRecord.booking_id==BookingApplication.id, ApprovalRecord.change_type=='booking')",
         cascade="all, delete-orphan",
         order_by="ApprovalRecord.created_at",
+    )
+    change_applications = relationship(
+        "BookingChangeApplication",
+        back_populates="booking",
+        cascade="all, delete-orphan",
+        order_by="BookingChangeApplication.submitted_at.desc()",
     )
 
 
@@ -288,11 +295,72 @@ class BookingWorkflowSnapshot(Base):
     booking = relationship("BookingApplication", back_populates="workflow_snapshot")
 
 
+class BookingChangeApplication(Base):
+    __tablename__ = "booking_change_applications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    booking_id = Column(Integer, ForeignKey("booking_applications.id"), nullable=False)
+    rule_id = Column(Integer, ForeignKey("booking_rules.id"), nullable=False)
+    rule_version = Column(Integer, nullable=False)
+
+    original_booking_date = Column(DateTime, nullable=False)
+    original_start_time = Column(DateTime, nullable=False)
+    original_end_time = Column(DateTime, nullable=False)
+    original_attendees = Column(Integer, default=0)
+    original_purpose = Column(Text)
+
+    target_booking_date = Column(DateTime, nullable=False)
+    target_start_time = Column(DateTime, nullable=False)
+    target_end_time = Column(DateTime, nullable=False)
+    target_attendees = Column(Integer, default=0)
+    target_purpose = Column(Text)
+
+    change_reason = Column(Text)
+    status = Column(Enum(BookingStatus), default=BookingStatus.PENDING, nullable=False)
+    current_node_index = Column(Integer, default=0)
+    submitted_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    submitted_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    booking = relationship("BookingApplication", back_populates="change_applications")
+    rule = relationship("BookingRule")
+    submitter = relationship("User", foreign_keys=[submitted_by])
+    workflow_snapshot = relationship(
+        "BookingChangeWorkflowSnapshot",
+        back_populates="change_application",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    approval_records = relationship(
+        "ApprovalRecord",
+        back_populates="change_application",
+        primaryjoin="and_(ApprovalRecord.change_id==BookingChangeApplication.id, ApprovalRecord.change_type=='change')",
+        cascade="all, delete-orphan",
+        order_by="ApprovalRecord.created_at",
+    )
+
+
+class BookingChangeWorkflowSnapshot(Base):
+    __tablename__ = "booking_change_workflow_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    change_id = Column(Integer, ForeignKey("booking_change_applications.id"), nullable=False, unique=True)
+    template_id = Column(Integer, nullable=False)
+    template_name = Column(String(100), nullable=False)
+    venue_type = Column(String(50), nullable=False)
+    nodes_json = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    change_application = relationship("BookingChangeApplication", back_populates="workflow_snapshot")
+
+
 class ApprovalRecord(Base):
     __tablename__ = "approval_records"
 
     id = Column(Integer, primary_key=True, index=True)
-    booking_id = Column(Integer, ForeignKey("booking_applications.id"), nullable=False)
+    booking_id = Column(Integer, ForeignKey("booking_applications.id"), nullable=True)
+    change_id = Column(Integer, ForeignKey("booking_change_applications.id"), nullable=True)
+    change_type = Column(String(20), default="booking")
     node_index = Column(Integer, nullable=False)
     node_name = Column(String(100), nullable=False)
     auditor_id = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -301,4 +369,9 @@ class ApprovalRecord(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     booking = relationship("BookingApplication", back_populates="approval_records")
+    change_application = relationship(
+        "BookingChangeApplication",
+        back_populates="approval_records",
+        primaryjoin="and_(ApprovalRecord.change_id==BookingChangeApplication.id, ApprovalRecord.change_type=='change')",
+    )
     auditor = relationship("User", back_populates="approval_records")

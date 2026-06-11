@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, TYPE_CHECKING
+from typing import Dict, List, Optional, TYPE_CHECKING, Union
 
 from sqlalchemy.orm import Session
 
@@ -6,6 +6,8 @@ from app.models import (
     ApprovalNode,
     ApprovalTemplate,
     BookingApplication,
+    BookingChangeApplication,
+    BookingChangeWorkflowSnapshot,
     BookingRule,
     BookingWorkflowSnapshot,
     TimeoutStrategy,
@@ -32,7 +34,7 @@ def serialize_template_nodes(template: ApprovalTemplate) -> List[Dict]:
     ]
 
 
-def deserialize_snapshot_nodes(snapshot: BookingWorkflowSnapshot) -> List[ApprovalNode]:
+def deserialize_snapshot_nodes(snapshot: Union[BookingWorkflowSnapshot, BookingChangeWorkflowSnapshot]) -> List[ApprovalNode]:
     nodes_data = snapshot.nodes_json
     result = []
     for data in nodes_data:
@@ -65,6 +67,21 @@ def get_booking_nodes(db: Session, booking: BookingApplication) -> List[Approval
     return sorted(template.nodes, key=lambda n: n.order_index)
 
 
+def get_change_nodes(db: Session, change: BookingChangeApplication) -> List[ApprovalNode]:
+    if change.workflow_snapshot:
+        return deserialize_snapshot_nodes(change.workflow_snapshot)
+
+    rule = db.query(BookingRule).filter(BookingRule.id == change.rule_id).first()
+    if not rule:
+        return []
+    template = db.query(ApprovalTemplate).filter(
+        ApprovalTemplate.id == rule.approval_template_id
+    ).first()
+    if not template:
+        return []
+    return sorted(template.nodes, key=lambda n: n.order_index)
+
+
 def get_booking_current_node(
     db: Session, booking: BookingApplication
 ) -> Optional[ApprovalNode]:
@@ -81,6 +98,22 @@ def get_booking_current_node(
     return None
 
 
+def get_change_current_node(
+    db: Session, change: BookingChangeApplication
+) -> Optional[ApprovalNode]:
+    nodes = get_change_nodes(db, change)
+    total_nodes = len(nodes)
+    if total_nodes == 0:
+        return None
+
+    if change.current_node_index >= total_nodes:
+        return None
+
+    if 0 <= change.current_node_index < total_nodes:
+        return nodes[change.current_node_index]
+    return None
+
+
 def has_booking_finished_all_nodes(
     db: Session, booking: BookingApplication
 ) -> bool:
@@ -89,3 +122,13 @@ def has_booking_finished_all_nodes(
     if total_nodes == 0:
         return True
     return booking.current_node_index >= total_nodes
+
+
+def has_change_finished_all_nodes(
+    db: Session, change: BookingChangeApplication
+) -> bool:
+    nodes = get_change_nodes(db, change)
+    total_nodes = len(nodes)
+    if total_nodes == 0:
+        return True
+    return change.current_node_index >= total_nodes

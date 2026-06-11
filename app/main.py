@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 from app.database import Base, engine, SessionLocal
 from app.models import User, UserRole
-from app.routers import auth, venues, templates, rules, bookings, approvals
+from app.routers import auth, venues, templates, rules, bookings, approvals, booking_changes
 from app.utils.security import get_password_hash
 
 
@@ -82,6 +82,7 @@ app.include_router(templates.router)
 app.include_router(rules.router)
 app.include_router(bookings.router)
 app.include_router(approvals.router)
+app.include_router(booking_changes.router)
 
 
 @app.get("/", tags=["系统"])
