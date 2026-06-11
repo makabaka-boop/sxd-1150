@@ -200,12 +200,32 @@ class BookingApplication(Base):
     rule = relationship("BookingRule", back_populates="bookings")
     submitter = relationship("User", foreign_keys=[submitted_by], back_populates="submitted_bookings")
     venue = relationship("Venue")
+    workflow_snapshot = relationship(
+        "BookingWorkflowSnapshot",
+        back_populates="booking",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
     approval_records = relationship(
         "ApprovalRecord",
         back_populates="booking",
         cascade="all, delete-orphan",
         order_by="ApprovalRecord.created_at",
     )
+
+
+class BookingWorkflowSnapshot(Base):
+    __tablename__ = "booking_workflow_snapshots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    booking_id = Column(Integer, ForeignKey("booking_applications.id"), nullable=False, unique=True)
+    template_id = Column(Integer, nullable=False)
+    template_name = Column(String(100), nullable=False)
+    venue_type = Column(String(50), nullable=False)
+    nodes_json = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    booking = relationship("BookingApplication", back_populates="workflow_snapshot")
 
 
 class ApprovalRecord(Base):

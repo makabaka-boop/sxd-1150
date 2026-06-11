@@ -58,6 +58,12 @@ def create_rule(
     if not template:
         raise HTTPException(status_code=400, detail="关联审批模板不存在或已删除")
 
+    if venue.venue_type != template.venue_type:
+        raise HTTPException(
+            status_code=400,
+            detail=f"场地类型 '{venue.venue_type}' 与审批模板类型 '{template.venue_type}' 不匹配，不能绑定",
+        )
+
     rule = BookingRule(
         venue_id=rule_in.venue_id,
         approval_template_id=rule_in.approval_template_id,
@@ -152,6 +158,11 @@ def update_rule(
         ).first()
         if not template:
             raise HTTPException(status_code=400, detail="关联审批模板不存在或已删除")
+        if rule.venue and rule.venue.venue_type != template.venue_type:
+            raise HTTPException(
+                status_code=400,
+                detail=f"场地类型 '{rule.venue.venue_type}' 与审批模板类型 '{template.venue_type}' 不匹配，不能绑定",
+            )
         rule.approval_template_id = rule_in.approval_template_id
 
     if rule_in.is_active is not None:

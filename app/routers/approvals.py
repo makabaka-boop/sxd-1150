@@ -25,32 +25,23 @@ from app.schemas import (
     BookingApplicationResponse,
     MessageResponse,
 )
+from app.workflow import (
+    get_booking_current_node,
+    get_booking_nodes,
+    has_booking_finished_all_nodes,
+)
 
 router = APIRouter(prefix="/api/approvals", tags=["审批工作流"])
 
 
-def _enrich_booking(booking: BookingApplication) -> BookingApplicationResponse:
+def _enrich_booking(
+    booking: BookingApplication, db: Session = None
+) -> BookingApplicationResponse:
     from app.routers.bookings import _enrich_booking_response
-    return _enrich_booking_response(booking)
-
-
-def _get_template_nodes(db: Session, booking: BookingApplication) -> List[ApprovalNode]:
-    rule = db.query(BookingRule).filter(BookingRule.id == booking.rule_id).first()
-    if not rule:
-        return []
-    template = db.query(ApprovalTemplate).filter(
-        ApprovalTemplate.id == rule.approval_template_id
-    ).first()
-    if not template:
-        return []
-    return sorted(template.nodes, key=lambda n: n.order_index)
-
-
-def _get_current_node(db: Session, booking: BookingApplication) -> Optional[ApprovalNode]:
-    nodes = _get_template_nodes(db, booking)
-    if 0 <= booking.current_node_index < len(nodes):
-        return nodes[booking.current_node_index]
-    return None
+    try:
+        return _enrich_booking_response(booking, db)
+    except Exception:
+        return _enrich_booking_response(booking, None)
 
 
 @router.get("/pending", response_model=BookingApplicationListResponse)
@@ -67,7 +58,7 @@ def list_pending_approvals(
     query = query.order_by(BookingApplication.submitted_at.asc())
     total = query.count()
     bookings = query.offset(skip).limit(limit).all()
-    enriched = [_enrich_booking(b) for b in bookings]
+    enriched = [_enrich_booking(b, db) for b in bookings]
     return BookingApplicationListResponse(items=enriched, total=total)
 
 
@@ -80,7 +71,7 @@ def get_approval_workflow(
     booking = db.query(BookingApplication).filter(BookingApplication.id == booking_id).first()
     if not booking:
         raise HTTPException(status_code=404, detail="预约申请不存在")
-    return _enrich_booking(booking)
+    return _enrich_booking(booking, db)
 
 
 @router.get("/{booking_id}/records", response_model=List[ApprovalRecordResponse])
@@ -123,17 +114,32 @@ def perform_approval_action(
             detail=f"当前状态为 {booking.status.value}，无法执行审批操作",
         )
 
-    nodes = _get_template_nodes(db, booking)
-    if not nodes:
+    nodes = get_booking_nodes(db, booking)
+    total_nodes = len(nodes)
+    if total_nodes == 0:
         raise HTTPException(status_code=400, detail="该预约未配置审批流程")
 
-    if booking.current_node_index >= len(nodes):
+    if has_booking_finished_all_nodes(db, booking):
         booking.status = BookingStatus.APPROVED
         db.commit()
         db.refresh(booking)
-        return _enrich_booking(booking)
+        return _enrich_booking(booking, db)
 
-    current_node = nodes[booking.current_node_index]
+    if booking.current_node_index >= total_nodes:
+        if booking.workflow_snapshot:
+            raise HTTPException(
+                status_code=400,
+                detail=f"该预约快照共 {total_nodes} 个节点，当前节点索引 {booking.current_node_index} 超出范围，请检查数据完整性",
+            )
+        else:
+            booking.status = BookingStatus.APPROVED
+            db.commit()
+            db.refresh(booking)
+            return _enrich_booking(booking, db)
+
+    current_node = get_booking_current_node(db, booking)
+    if not current_node:
+        raise HTTPException(status_code=400, detail="无法定位当前审批节点")
 
     if current_node.auditor_role == UserRole.ADMIN and current_user.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="该节点需要管理员角色审批")
@@ -152,7 +158,7 @@ def perform_approval_action(
 
     if action_req.action == ApprovalAction.AGREE:
         next_index = booking.current_node_index + 1
-        if next_index >= len(nodes):
+        if next_index >= total_nodes:
             booking.status = BookingStatus.APPROVED
             booking.current_node_index = next_index
         else:
@@ -167,7 +173,7 @@ def perform_approval_action(
 
     db.commit()
     db.refresh(booking)
-    return _enrich_booking(booking)
+    return _enrich_booking(booking, db)
 
 
 @router.post("/{booking_id}/timeout-check", response_model=MessageResponse)
@@ -183,11 +189,15 @@ def check_and_handle_timeout(
     if booking.status not in [BookingStatus.PENDING, BookingStatus.APPROVING]:
         return MessageResponse(message=f"当前状态 {booking.status.value} 无需超时检查")
 
-    nodes = _get_template_nodes(db, booking)
-    if not nodes or booking.current_node_index >= len(nodes):
+    nodes = get_booking_nodes(db, booking)
+    total_nodes = len(nodes)
+    if total_nodes == 0 or booking.current_node_index >= total_nodes:
         return MessageResponse(message="无待处理节点")
 
-    current_node = nodes[booking.current_node_index]
+    current_node = get_booking_current_node(db, booking)
+    if not current_node:
+        return MessageResponse(message="无法定位当前审批节点")
+
     last_record = db.query(ApprovalRecord).filter(
         ApprovalRecord.booking_id == booking_id
     ).order_by(ApprovalRecord.created_at.desc()).first()
@@ -230,7 +240,7 @@ def check_and_handle_timeout(
         )
         db.add(record)
         next_index = booking.current_node_index + 1
-        if next_index >= len(nodes):
+        if next_index >= total_nodes:
             booking.status = BookingStatus.APPROVED
         else:
             booking.current_node_index = next_index

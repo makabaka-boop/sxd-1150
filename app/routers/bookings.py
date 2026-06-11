@@ -8,10 +8,12 @@ from app.deps import require_admin_or_operator, require_all_authenticated
 from app.models import (
     ApprovalNode,
     ApprovalRecord,
+    ApprovalTemplate,
     BookingApplication,
     BookingRule,
     BookingRuleVersion,
     BookingStatus,
+    BookingWorkflowSnapshot,
     User,
     Venue,
 )
@@ -24,32 +26,63 @@ from app.schemas import (
     BookingCancelRequest,
     MessageResponse,
 )
+from app.workflow import (
+    get_booking_current_node,
+    get_booking_nodes,
+    serialize_template_nodes,
+)
 
 router = APIRouter(prefix="/api/bookings", tags=["预约申请管理"])
 
 
-def _enrich_booking_response(booking: BookingApplication) -> BookingApplicationResponse:
+def _enrich_booking_response(
+    booking: BookingApplication, db: Session = None
+) -> BookingApplicationResponse:
     resp = BookingApplicationResponse.model_validate(booking)
-    if booking.venue:
-        resp.venue_name = booking.venue.name
-    if booking.submitter:
-        resp.submitter_name = booking.submitter.full_name or booking.submitter.username
+    try:
+        if booking.venue:
+            resp.venue_name = booking.venue.name
+    except Exception:
+        pass
+    try:
+        if booking.submitter:
+            resp.submitter_name = booking.submitter.full_name or booking.submitter.username
+    except Exception:
+        pass
 
-    template = None
-    if booking.rule and booking.rule.approval_template:
-        template = booking.rule.approval_template
-
-    if template:
-        sorted_nodes = sorted(template.nodes, key=lambda n: n.order_index)
-        if 0 <= booking.current_node_index < len(sorted_nodes):
-            resp.current_node_name = sorted_nodes[booking.current_node_index].node_name
+    try:
+        if db is not None:
+            current_node = get_booking_current_node(db, booking)
+            if current_node:
+                resp.current_node_name = current_node.node_name
+        else:
+            nodes = None
+            if booking.workflow_snapshot:
+                from app.workflow import deserialize_snapshot_nodes
+                nodes = deserialize_snapshot_nodes(booking.workflow_snapshot)
+            else:
+                try:
+                    if booking.rule and booking.rule.approval_template:
+                        nodes = sorted(
+                            booking.rule.approval_template.nodes,
+                            key=lambda n: n.order_index,
+                        )
+                except Exception:
+                    nodes = None
+            if nodes and 0 <= booking.current_node_index < len(nodes):
+                resp.current_node_name = nodes[booking.current_node_index].node_name
+    except Exception:
+        pass
 
     enriched_records = []
     for r in booking.approval_records:
-        r_resp = ApprovalRecordResponse.model_validate(r)
-        if r.auditor:
-            r_resp.auditor_name = r.auditor.full_name or r.auditor.username
-        enriched_records.append(r_resp)
+        try:
+            r_resp = ApprovalRecordResponse.model_validate(r)
+            if r.auditor:
+                r_resp.auditor_name = r.auditor.full_name or r.auditor.username
+            enriched_records.append(r_resp)
+        except Exception:
+            continue
     resp.approval_records = enriched_records
     return resp
 
@@ -121,6 +154,13 @@ def create_booking(
     if booking_in.start_time >= booking_in.end_time:
         raise HTTPException(status_code=400, detail="结束时间必须晚于开始时间")
 
+    template = db.query(ApprovalTemplate).filter(
+        ApprovalTemplate.id == rule.approval_template_id,
+        ApprovalTemplate.is_deleted == False,
+    ).first()
+    if not template:
+        raise HTTPException(status_code=400, detail="关联审批模板不存在或已删除")
+
     booking = BookingApplication(
         rule_id=booking_in.rule_id,
         rule_version=current_version,
@@ -138,9 +178,20 @@ def create_booking(
         submitted_by=current_user.id,
     )
     db.add(booking)
+    db.flush()
+
+    snapshot = BookingWorkflowSnapshot(
+        booking_id=booking.id,
+        template_id=template.id,
+        template_name=template.name,
+        venue_type=template.venue_type,
+        nodes_json=serialize_template_nodes(template),
+    )
+    db.add(snapshot)
+
     db.commit()
     db.refresh(booking)
-    return _enrich_booking_response(booking)
+    return _enrich_booking_response(booking, db)
 
 
 @router.get("", response_model=BookingApplicationListResponse)
@@ -160,10 +211,10 @@ def list_bookings(
         query = query.filter(BookingApplication.status == status)
     if venue_id:
         query = query.filter(BookingApplication.venue_id == venue_id)
-    query = query.order_by(BookingApplication.created_at.desc())
+    query = query.order_by(BookingApplication.submitted_at.desc())
     total = query.count()
     bookings = query.offset(skip).limit(limit).all()
-    enriched = [_enrich_booking_response(b) for b in bookings]
+    enriched = [_enrich_booking_response(b, db) for b in bookings]
     return BookingApplicationListResponse(items=enriched, total=total)
 
 
@@ -176,7 +227,7 @@ def get_booking(
     booking = db.query(BookingApplication).filter(BookingApplication.id == booking_id).first()
     if not booking:
         raise HTTPException(status_code=404, detail="预约申请不存在")
-    return _enrich_booking_response(booking)
+    return _enrich_booking_response(booking, db)
 
 
 @router.put("/{booking_id}", response_model=BookingApplicationResponse)
@@ -221,9 +272,28 @@ def update_booking(
         booking.current_node_index = 0
         db.query(ApprovalRecord).filter(ApprovalRecord.booking_id == booking.id).delete()
 
+        rule = db.query(BookingRule).filter(BookingRule.id == booking.rule_id).first()
+        if rule:
+            template = db.query(ApprovalTemplate).filter(
+                ApprovalTemplate.id == rule.approval_template_id,
+                ApprovalTemplate.is_deleted == False,
+            ).first()
+            if template:
+                db.query(BookingWorkflowSnapshot).filter(
+                    BookingWorkflowSnapshot.booking_id == booking.id
+                ).delete()
+                new_snapshot = BookingWorkflowSnapshot(
+                    booking_id=booking.id,
+                    template_id=template.id,
+                    template_name=template.name,
+                    venue_type=template.venue_type,
+                    nodes_json=serialize_template_nodes(template),
+                )
+                db.add(new_snapshot)
+
     db.commit()
     db.refresh(booking)
-    return _enrich_booking_response(booking)
+    return _enrich_booking_response(booking, db)
 
 
 @router.post("/{booking_id}/cancel", response_model=MessageResponse)
