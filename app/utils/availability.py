@@ -24,6 +24,39 @@ def check_venue_active(venue: Venue) -> Optional[str]:
     return None
 
 
+def check_same_day_booking(
+    booking_date: date, start_time: datetime, end_time: datetime
+) -> Optional[str]:
+    start_date = start_time.date() if hasattr(start_time, 'date') else start_time
+    end_date = end_time.date() if hasattr(end_time, 'date') else end_time
+
+    if start_date != booking_date:
+        return f"预约开始时间 ({start_time.strftime('%Y-%m-%d %H:%M')}) 与预约日期 ({booking_date.strftime('%Y-%m-%d')}) 不一致，不允许跨天预约"
+    if end_date != booking_date:
+        return f"预约结束时间 ({end_time.strftime('%Y-%m-%d %H:%M')}) 与预约日期 ({booking_date.strftime('%Y-%m-%d')}) 不一致，不允许跨天预约"
+    if end_time <= start_time:
+        return "结束时间必须晚于开始时间"
+    return None
+
+
+def check_rule_active(rule: BookingRule, version: int) -> Optional[str]:
+    if rule.is_deleted:
+        return "预约规则已删除，不可使用"
+    if not rule.is_active:
+        return "预约规则已停用，不可使用"
+
+    rule_version = None
+    for v in rule.versions:
+        if v.version == version:
+            rule_version = v
+            break
+    if not rule_version:
+        return f"规则版本 v{version} 不存在"
+    if version != rule.current_version:
+        return f"规则版本 v{version} 已失效，当前最新版本为 v{rule.current_version}"
+    return None
+
+
 def check_booking_date_rule(
     booking_date: date, rule: BookingRule, version: int
 ) -> Optional[str]:
@@ -158,7 +191,15 @@ def validate_booking_availability(
     end_time: datetime,
     exclude_booking_id: Optional[int] = None,
 ) -> None:
+    reason = check_same_day_booking(booking_date, start_time, end_time)
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+
     reason = check_venue_active(venue)
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
+
+    reason = check_rule_active(rule, rule_version)
     if reason:
         raise HTTPException(status_code=400, detail=reason)
 
@@ -196,6 +237,12 @@ def compute_booking_conflict_status(
     ]:
         return None, None
 
+    rule = db.query(BookingRule).filter(BookingRule.id == booking.rule_id).first()
+    if rule:
+        rule_reason = check_rule_active(rule, booking.rule_version)
+        if rule_reason:
+            return "rule_invalid", rule_reason
+
     venue = db.query(Venue).filter(Venue.id == booking.venue_id).first()
     if not venue:
         return "venue_not_found", "场地不存在"
@@ -205,6 +252,19 @@ def compute_booking_conflict_status(
         return "venue_unavailable", venue_reason
 
     booking_date = booking.booking_date.date() if hasattr(booking.booking_date, 'date') else booking.booking_date
+
+    same_day_reason = check_same_day_booking(
+        booking_date, booking.start_time, booking.end_time
+    )
+    if same_day_reason:
+        return "cross_day_booking", same_day_reason
+
+    if rule:
+        date_rule_reason = check_booking_date_rule(
+            booking_date, rule, booking.rule_version
+        )
+        if date_rule_reason:
+            return "date_rule_violation", date_rule_reason
 
     slot_reason = check_time_in_available_slots(
         db, venue.id, booking_date, booking.start_time, booking.end_time
@@ -232,6 +292,7 @@ def get_available_time_slots(
     venue_id: int,
     query_date: date,
     slot_duration_minutes: int = 30,
+    rule: Optional[BookingRule] = None,
 ) -> List[dict]:
     weekday = Weekday(query_date.weekday())
     slots = (
@@ -247,6 +308,12 @@ def get_available_time_slots(
 
     if not slots:
         return []
+
+    rule_reason = None
+    if rule:
+        rule_reason = check_rule_active(rule, rule.current_version)
+        if not rule_reason:
+            rule_reason = check_booking_date_rule(query_date, rule, rule.current_version)
 
     unavailable_periods = (
         db.query(VenueUnavailablePeriod)
@@ -277,6 +344,18 @@ def get_available_time_slots(
         if (b.start_time.date() if hasattr(b.start_time, 'date') else b.start_time) == query_date
     ]
 
+    min_duration = 0
+    max_duration = float('inf')
+    if rule:
+        rule_version = None
+        for v in rule.versions:
+            if v.version == rule.current_version:
+                rule_version = v
+                break
+        if rule_version:
+            min_duration = rule_version.min_duration_hours
+            max_duration = rule_version.max_duration_hours
+
     result = []
     for slot in slots:
         current = datetime.combine(query_date, slot.start_time)
@@ -289,16 +368,29 @@ def get_available_time_slots(
             available = True
             reason = None
 
-            for up in unavailable_periods:
-                if up.start_time is not None and up.end_time is not None:
-                    if seg_start.time() < up.end_time and seg_end.time() > up.start_time:
+            if rule_reason:
+                available = False
+                reason = rule_reason
+            else:
+                slot_hours = delta.total_seconds() / 3600
+                if slot_hours < min_duration:
+                    available = False
+                    reason = f"时段小于规则要求的最小时长 {min_duration} 小时"
+                elif slot_hours > max_duration:
+                    available = False
+                    reason = f"时段超过规则允许的最大时长 {max_duration} 小时"
+
+            if available:
+                for up in unavailable_periods:
+                    if up.start_time is not None and up.end_time is not None:
+                        if seg_start.time() < up.end_time and seg_end.time() > up.start_time:
+                            available = False
+                            reason = up.reason
+                            break
+                    else:
                         available = False
                         reason = up.reason
                         break
-                else:
-                    available = False
-                    reason = up.reason
-                    break
 
             if available:
                 for b in day_bookings:
@@ -316,3 +408,37 @@ def get_available_time_slots(
             current = seg_end
 
     return result
+
+
+def check_available_slot_validity(
+    db: Session,
+    venue_id: int,
+    weekday: Weekday,
+    start_time: time,
+    end_time: time,
+    exclude_slot_id: Optional[int] = None,
+) -> Optional[str]:
+    if end_time <= start_time:
+        return "结束时间必须晚于开始时间，且不允许跨零点（24:00）"
+
+    existing_slots = (
+        db.query(VenueAvailableSlot)
+        .filter(
+            VenueAvailableSlot.venue_id == venue_id,
+            VenueAvailableSlot.weekday == weekday,
+            VenueAvailableSlot.is_active == True,
+        )
+        .all()
+    )
+
+    if exclude_slot_id is not None:
+        existing_slots = [s for s in existing_slots if s.id != exclude_slot_id]
+
+    for slot in existing_slots:
+        if start_time < slot.end_time and end_time > slot.start_time:
+            return (
+                f"时段与已有开放时段（ID: {slot.id}, "
+                f"{slot.start_time.strftime('%H:%M')}-{slot.end_time.strftime('%H:%M')}）发生重叠"
+            )
+
+    return None

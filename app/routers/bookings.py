@@ -26,7 +26,11 @@ from app.schemas import (
     BookingCancelRequest,
     MessageResponse,
 )
-from app.utils.availability import compute_booking_conflict_status, validate_booking_availability
+from app.utils.availability import (
+    check_same_day_booking,
+    compute_booking_conflict_status,
+    validate_booking_availability,
+)
 from app.workflow import (
     get_booking_current_node,
     get_booking_nodes,
@@ -159,13 +163,14 @@ def create_booking(
     if not venue:
         raise HTTPException(status_code=400, detail="关联场地不可用")
 
-    if booking_in.start_time >= booking_in.end_time:
-        raise HTTPException(status_code=400, detail="结束时间必须晚于开始时间")
+    booking_date = booking_in.booking_date.date() if hasattr(booking_in.booking_date, 'date') else booking_in.booking_date
+    same_day_reason = check_same_day_booking(booking_date, booking_in.start_time, booking_in.end_time)
+    if same_day_reason:
+        raise HTTPException(status_code=400, detail=same_day_reason)
 
     current_version = rule.current_version
     _validate_booking_against_rule(db, booking_in, rule, current_version)
 
-    booking_date = booking_in.booking_date.date() if hasattr(booking_in.booking_date, 'date') else booking_in.booking_date
     validate_booking_availability(
         db=db,
         venue=venue,
@@ -283,8 +288,10 @@ def update_booking(
     for field, value in update_data.items():
         setattr(booking, field, value)
 
-    if booking.start_time >= booking.end_time:
-        raise HTTPException(status_code=400, detail="结束时间必须晚于开始时间")
+    booking_date = booking.booking_date.date() if hasattr(booking.booking_date, 'date') else booking.booking_date
+    same_day_reason = check_same_day_booking(booking_date, booking.start_time, booking.end_time)
+    if same_day_reason:
+        raise HTTPException(status_code=400, detail=same_day_reason)
 
     rule = db.query(BookingRule).filter(BookingRule.id == booking.rule_id).first()
     if rule:
@@ -292,7 +299,6 @@ def update_booking(
 
     venue = db.query(Venue).filter(Venue.id == booking.venue_id).first()
     if venue and rule:
-        booking_date = booking.booking_date.date() if hasattr(booking.booking_date, 'date') else booking.booking_date
         validate_booking_availability(
             db=db,
             venue=venue,

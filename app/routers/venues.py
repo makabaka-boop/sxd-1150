@@ -1,4 +1,5 @@
 from datetime import date
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -7,6 +8,7 @@ from app.database import get_db
 from app.deps import require_admin, require_all_authenticated
 from app.models import (
     BookingApplication,
+    BookingRule,
     User,
     Venue,
     VenueAvailableSlot,
@@ -31,7 +33,7 @@ from app.schemas import (
     VenueUnavailablePeriodUpdate,
     VenueUpdate,
 )
-from app.utils.availability import get_available_time_slots
+from app.utils.availability import check_available_slot_validity, get_available_time_slots
 
 router = APIRouter(prefix="/api/venues", tags=["场地管理"])
 
@@ -183,6 +185,12 @@ def create_available_slot(
     if not venue:
         raise HTTPException(status_code=404, detail="场地不存在或已删除")
 
+    validity_reason = check_available_slot_validity(
+        db, venue_id, slot_in.weekday, slot_in.start_time, slot_in.end_time
+    )
+    if validity_reason:
+        raise HTTPException(status_code=400, detail=validity_reason)
+
     existing = db.query(VenueAvailableSlot).filter(
         VenueAvailableSlot.venue_id == venue_id,
         VenueAvailableSlot.weekday == slot_in.weekday,
@@ -244,6 +252,16 @@ def update_available_slot(
     ).first()
     if not slot:
         raise HTTPException(status_code=404, detail="开放时段不存在")
+
+    weekday = slot_in.weekday if slot_in.weekday is not None else slot.weekday
+    start_time = slot_in.start_time if slot_in.start_time is not None else slot.start_time
+    end_time = slot_in.end_time if slot_in.end_time is not None else slot.end_time
+
+    validity_reason = check_available_slot_validity(
+        db, venue_id, weekday, start_time, end_time, slot_id
+    )
+    if validity_reason:
+        raise HTTPException(status_code=400, detail=validity_reason)
 
     update_data = slot_in.model_dump(exclude_unset=True)
     for field, value in update_data.items():
@@ -380,6 +398,7 @@ def get_venue_available_times(
     venue_id: int,
     query_date: date = Query(..., description="查询日期"),
     slot_duration: int = Query(30, ge=15, le=120, description="时段粒度（分钟）"),
+    rule_id: Optional[int] = Query(None, description="预约规则ID，传入则按规则校验"),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_all_authenticated),
 ):
@@ -389,7 +408,17 @@ def get_venue_available_times(
     if not venue.is_active:
         raise HTTPException(status_code=400, detail="场地已停用")
 
-    slots = get_available_time_slots(db, venue_id, query_date, slot_duration)
+    rule = None
+    if rule_id is not None:
+        rule = db.query(BookingRule).filter(
+            BookingRule.id == rule_id,
+            BookingRule.venue_id == venue_id,
+            BookingRule.is_deleted == False,
+        ).first()
+        if not rule:
+            raise HTTPException(status_code=404, detail="该场地不存在此预约规则")
+
+    slots = get_available_time_slots(db, venue_id, query_date, slot_duration, rule)
     return VenueAvailableTimeSlotsResponse(
         venue_id=venue_id,
         date=query_date,
