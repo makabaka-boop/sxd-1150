@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime, time
 from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
@@ -9,6 +9,7 @@ from app.models import (
     DeleteType,
     TimeoutStrategy,
     UserRole,
+    Weekday,
 )
 
 
@@ -100,6 +101,121 @@ class VenueResponse(BaseModel):
 class VenueListResponse(BaseModel):
     items: List[VenueResponse]
     total: int
+
+
+class VenueAvailableSlotCreate(BaseModel):
+    weekday: Weekday
+    start_time: time
+    end_time: time
+    is_active: bool = True
+
+    @field_validator("end_time")
+    @classmethod
+    def check_time_range(cls, v, info):
+        start = info.data.get("start_time")
+        if start is not None and v <= start:
+            raise ValueError("结束时间必须晚于开始时间")
+        return v
+
+
+class VenueAvailableSlotUpdate(BaseModel):
+    weekday: Optional[Weekday] = None
+    start_time: Optional[time] = None
+    end_time: Optional[time] = None
+    is_active: Optional[bool] = None
+
+    @field_validator("end_time")
+    @classmethod
+    def check_time_range(cls, v, info):
+        start = info.data.get("start_time")
+        if start is not None and v is not None and v <= start:
+            raise ValueError("结束时间必须晚于开始时间")
+        return v
+
+
+class VenueAvailableSlotResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    venue_id: int
+    weekday: Weekday
+    start_time: time
+    end_time: time
+    is_active: bool
+    created_at: datetime
+
+
+class VenueAvailableSlotListResponse(BaseModel):
+    items: List[VenueAvailableSlotResponse]
+    total: int
+
+
+class VenueUnavailablePeriodCreate(BaseModel):
+    start_date: date
+    end_date: date
+    start_time: Optional[time] = None
+    end_time: Optional[time] = None
+    reason: str = Field(..., min_length=1, max_length=200)
+    is_active: bool = True
+
+    @field_validator("end_date")
+    @classmethod
+    def check_date_range(cls, v, info):
+        start = info.data.get("start_date")
+        if start is not None and v < start:
+            raise ValueError("结束日期不能早于开始日期")
+        return v
+
+    @field_validator("end_time")
+    @classmethod
+    def check_time_range(cls, v, info):
+        start = info.data.get("start_time")
+        if start is not None and v is not None and v <= start:
+            raise ValueError("结束时间必须晚于开始时间")
+        if (start is None) != (v is None):
+            raise ValueError("开始时间和结束时间必须同时提供或同时为空")
+        return v
+
+
+class VenueUnavailablePeriodUpdate(BaseModel):
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    start_time: Optional[time] = None
+    end_time: Optional[time] = None
+    reason: Optional[str] = Field(None, min_length=1, max_length=200)
+    is_active: Optional[bool] = None
+
+
+class VenueUnavailablePeriodResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    venue_id: int
+    start_date: date
+    end_date: date
+    start_time: Optional[time] = None
+    end_time: Optional[time] = None
+    reason: str
+    is_active: bool
+    created_at: datetime
+
+
+class VenueUnavailablePeriodListResponse(BaseModel):
+    items: List[VenueUnavailablePeriodResponse]
+    total: int
+
+
+class AvailableTimeSlotResponse(BaseModel):
+    start_time: datetime
+    end_time: datetime
+    available: bool
+    unavailable_reason: Optional[str] = None
+
+
+class VenueAvailableTimeSlotsResponse(BaseModel):
+    venue_id: int
+    date: date
+    slots: List[AvailableTimeSlotResponse]
 
 
 class ApprovalNodeBase(BaseModel):
@@ -330,6 +446,8 @@ class BookingApplicationResponse(BaseModel):
     cancellation_reason: Optional[str] = None
     cancelled_at: Optional[datetime] = None
     approval_records: List[ApprovalRecordResponse] = []
+    conflict_status: Optional[str] = None
+    unavailability_reason: Optional[str] = None
 
 
 class BookingApplicationListResponse(BaseModel):

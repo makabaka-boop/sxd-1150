@@ -1,9 +1,10 @@
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from enum import Enum as PyEnum
 
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     DateTime,
     Enum,
     Float,
@@ -12,11 +13,22 @@ from sqlalchemy import (
     JSON,
     String,
     Text,
+    Time,
     UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 
 from app.database import Base
+
+
+class Weekday(int, PyEnum):
+    MON = 0
+    TUE = 1
+    WED = 2
+    THU = 3
+    FRI = 4
+    SAT = 5
+    SUN = 6
 
 
 class UserRole(str, PyEnum):
@@ -90,6 +102,54 @@ class Venue(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     booking_rules = relationship("BookingRule", back_populates="venue")
+    available_slots = relationship(
+        "VenueAvailableSlot",
+        back_populates="venue",
+        cascade="all, delete-orphan",
+        order_by="VenueAvailableSlot.weekday, VenueAvailableSlot.start_time",
+    )
+    unavailable_periods = relationship(
+        "VenueUnavailablePeriod",
+        back_populates="venue",
+        cascade="all, delete-orphan",
+        order_by="VenueUnavailablePeriod.start_date",
+    )
+
+
+class VenueAvailableSlot(Base):
+    __tablename__ = "venue_available_slots"
+
+    id = Column(Integer, primary_key=True, index=True)
+    venue_id = Column(Integer, ForeignKey("venues.id"), nullable=False)
+    weekday = Column(Enum(Weekday), nullable=False)
+    start_time = Column(Time, nullable=False)
+    end_time = Column(Time, nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("venue_id", "weekday", "start_time", "end_time", name="uq_venue_slot"),
+    )
+
+    venue = relationship("Venue", back_populates="available_slots")
+
+
+class VenueUnavailablePeriod(Base):
+    __tablename__ = "venue_unavailable_periods"
+
+    id = Column(Integer, primary_key=True, index=True)
+    venue_id = Column(Integer, ForeignKey("venues.id"), nullable=False)
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date, nullable=False)
+    start_time = Column(Time, nullable=True)
+    end_time = Column(Time, nullable=True)
+    reason = Column(String(200), nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    venue = relationship("Venue", back_populates="unavailable_periods")
 
 
 class ApprovalTemplate(Base):

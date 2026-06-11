@@ -26,6 +26,7 @@ from app.schemas import (
     BookingCancelRequest,
     MessageResponse,
 )
+from app.utils.availability import compute_booking_conflict_status, validate_booking_availability
 from app.workflow import (
     get_booking_current_node,
     get_booking_nodes,
@@ -71,6 +72,16 @@ def _enrich_booking_response(
                     nodes = None
             if nodes and 0 <= booking.current_node_index < len(nodes):
                 resp.current_node_name = nodes[booking.current_node_index].node_name
+    except Exception:
+        pass
+
+    try:
+        if db is not None:
+            conflict_status, unavailability_reason = compute_booking_conflict_status(
+                db, booking
+            )
+            resp.conflict_status = conflict_status
+            resp.unavailability_reason = unavailability_reason
     except Exception:
         pass
 
@@ -148,11 +159,23 @@ def create_booking(
     if not venue:
         raise HTTPException(status_code=400, detail="关联场地不可用")
 
+    if booking_in.start_time >= booking_in.end_time:
+        raise HTTPException(status_code=400, detail="结束时间必须晚于开始时间")
+
     current_version = rule.current_version
     _validate_booking_against_rule(db, booking_in, rule, current_version)
 
-    if booking_in.start_time >= booking_in.end_time:
-        raise HTTPException(status_code=400, detail="结束时间必须晚于开始时间")
+    booking_date = booking_in.booking_date.date() if hasattr(booking_in.booking_date, 'date') else booking_in.booking_date
+    validate_booking_availability(
+        db=db,
+        venue=venue,
+        rule=rule,
+        rule_version=current_version,
+        booking_date=booking_date,
+        start_time=booking_in.start_time,
+        end_time=booking_in.end_time,
+        exclude_booking_id=None,
+    )
 
     template = db.query(ApprovalTemplate).filter(
         ApprovalTemplate.id == rule.approval_template_id,
@@ -260,12 +283,26 @@ def update_booking(
     for field, value in update_data.items():
         setattr(booking, field, value)
 
+    if booking.start_time >= booking.end_time:
+        raise HTTPException(status_code=400, detail="结束时间必须晚于开始时间")
+
     rule = db.query(BookingRule).filter(BookingRule.id == booking.rule_id).first()
     if rule:
         _validate_booking_against_rule(db, booking, rule, booking.rule_version)
 
-    if booking.start_time >= booking.end_time:
-        raise HTTPException(status_code=400, detail="结束时间必须晚于开始时间")
+    venue = db.query(Venue).filter(Venue.id == booking.venue_id).first()
+    if venue and rule:
+        booking_date = booking.booking_date.date() if hasattr(booking.booking_date, 'date') else booking.booking_date
+        validate_booking_availability(
+            db=db,
+            venue=venue,
+            rule=rule,
+            rule_version=booking.rule_version,
+            booking_date=booking_date,
+            start_time=booking.start_time,
+            end_time=booking.end_time,
+            exclude_booking_id=booking.id,
+        )
 
     if booking.status == BookingStatus.RETURNED:
         booking.status = BookingStatus.PENDING
